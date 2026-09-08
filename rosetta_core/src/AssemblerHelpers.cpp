@@ -1,9 +1,11 @@
 #include "rosetta_core/AssemblerHelpers.hpp"
 
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 
 #include "rosetta_core/AssemblerBuffer.h"
+#include "rosetta_core/TranscendentalHelper.h"
 #include "rosetta_core/IROperand.h"
 #include "rosetta_core/ProfileRuntime.h"
 #include "rosetta_core/Register.h"
@@ -636,6 +638,27 @@ auto emit_movi_d_zero(AssemblerBuffer& buf, int Dd) -> void {
 }
 
 auto emit_f64_const(AssemblerBuffer& buf, int Dd, uint64_t bits, int Xtmp) -> void {
+    // EXPERIMENT (CoD2 issue #23, still crashing on v1.6.0): the "+1" of the
+    // Miles pitch chain is materialised here as MOVZ/MOVK + FMOV Dd, Xtmp —
+    // FMOV (general) is an encoding stock's helper-call x87 translations
+    // never contain, so it is a candidate for the same silent skip that hit
+    // FMOV D,#1.0.  For 1.0 specifically the transcendental constants page
+    // already holds the value (TranscendentalConstants::one), so load it
+    // with a plain LDR (imm) off a MOVZ/MOVK-materialised base — both are
+    // encodings stock emits everywhere.  Only 1.0 is redirected, on purpose:
+    // this isolates the +1 path as a discriminator for the live trigger.
+    // Falls back to the GPR path when no constants page is installed
+    // (offline tools / early startup).
+    if (bits == 0x3FF0000000000000ULL) {
+        const uint64_t base = rosetta_core::get_transcendental_constants_addr();
+        if (base != 0) {
+            emit_movz_movk_abs64(buf, Xtmp, base);
+            emit_fldr_imm(buf, /*size=*/3, Dd, Xtmp,
+                          static_cast<int16_t>(
+                              offsetof(rosetta_core::TranscendentalConstants, one) / 8));
+            return;
+        }
+    }
     // MOVZ for the first non-zero halfword (or #0), MOVK for the remaining
     // non-zero ones, then FMOV Dd, Xtmp.  See the header for why neither an
     // FP immediate nor an inline literal is used.
